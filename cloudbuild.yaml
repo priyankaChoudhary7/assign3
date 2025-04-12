@@ -1,0 +1,20 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '--platform', 'linux/amd64', '-t', 'gcr.io/parabolic-clock-443214-a9/choudhary-flask-app:latest', '.']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/parabolic-clock-443214-a9/choudhary-flask-app:latest']
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args:
+      - run
+      - services
+      - update
+      - choudhary-cloud-run
+      - --image
+      - gcr.io/parabolic-clock-443214-a9/choudhary-flask-app:latest
+      - --region
+      - us-central1
+      - --platform
+      - managed
+      - --allow-unauthenticated
+      - --set-env-vars
+      - PORT=5000
