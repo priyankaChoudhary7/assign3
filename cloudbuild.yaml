@@ -10,11 +10,11 @@ steps:
       - update
       - choudhary-cloud-run
       - --image
-      - gcr.io/parabolic-clock-443214-a9/choudhary-flask-app:latest
+      - gcr.io/$PROJECT_ID/choudhary-flask-app:latest
       - --region
       - us-central1
       - --platform
       - managed
       - --allow-unauthenticated
-      - --set-env-vars
-      - PORT=5000
+      - --port
+      - '8080'
