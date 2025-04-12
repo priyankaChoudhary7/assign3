@@ -1,0 +1,398 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC
+  Subnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR block for Subnet 1
+  Subnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CIDR block for Subnet 2
+  GitHubSecretArn:
+    Type: String
+    
+
+Resources:
+  # VPC
+  ChoudharyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ChoudharyVPC
+
+  # Subnets
+  ChoudharyPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ChoudharyVPC
+      CidrBlock: !Ref Subnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: ChoudharyPublicSubnet1
+
+  ChoudharyPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ChoudharyVPC
+      CidrBlock: !Ref Subnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: ChoudharyPublicSubnet2
+
+  # Internet Gateway
+  ChoudharyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ChoudharyIGW
+
+  ChoudharyGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ChoudharyVPC
+      InternetGatewayId: !Ref ChoudharyInternetGateway
+
+  # Route Table
+  ChoudharyRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ChoudharyVPC
+      Tags:
+        - Key: Name
+          Value: ChoudharyRouteTable
+
+  ChoudharyRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ChoudharyRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ChoudharyInternetGateway
+
+  ChoudharySubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ChoudharyPublicSubnet1
+      RouteTableId: !Ref ChoudharyRouteTable
+
+  ChoudharySubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ChoudharyPublicSubnet2
+      RouteTableId: !Ref ChoudharyRouteTable
+
+  # Security Group for ALB
+  ChoudharyALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref ChoudharyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Security Group for ECS
+  ChoudharyECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS
+      VpcId: !Ref ChoudharyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref ChoudharyALBSecurityGroup
+
+  # Application Load Balancer
+  ChoudharyLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref ChoudharyPublicSubnet1
+        - !Ref ChoudharyPublicSubnet2
+      SecurityGroups:
+        - !Ref ChoudharyALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: ChoudharyALB
+    DependsOn:
+      - ChoudharyGatewayAttachment
+      - ChoudharySubnetRouteTableAssociation1
+      - ChoudharySubnetRouteTableAssociation2
+
+  ChoudharyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref ChoudharyVPC
+      TargetType: ip
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+    DependsOn: ChoudharyLoadBalancer
+
+  ChoudharyListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ChoudharyLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ChoudharyTargetGroup
+    DependsOn: ChoudharyTargetGroup
+
+  # ECS Cluster
+  ChoudharyCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ChoudharyCluster
+
+  # ECR Repository
+  ChoudharyECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: choudhary-app
+
+  # ECS Task Definition
+  ChoudharyTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: choudhary-task
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt ChoudharyECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ChoudharyECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: choudhary-container
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/choudhary-app:latest
+          PortMappings:
+            - ContainerPort: 5000
+          Essential: true
+
+  # ECS Service
+  ChoudharyService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ChoudharyCluster
+      ServiceName: ChoudharyService
+      TaskDefinition: !Ref ChoudharyTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref ChoudharyPublicSubnet1
+            - !Ref ChoudharyPublicSubnet2
+          SecurityGroups:
+            - !Ref ChoudharyECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: choudhary-container
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ChoudharyTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+    DependsOn:
+      - ChoudharyListener
+      - ChoudharyLoadBalancer
+      - ChoudharyTargetGroup
+
+  # IAM Roles
+  ChoudharyECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ChoudharyECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  ChoudharyCodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ChoudharyCodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:*
+                  - ecs:*
+                  - ecr:*
+                  - s3:*
+                  - iam:PassRole
+                  - secretsmanager:GetSecretValue
+                Resource: '*'
+
+  ChoudharyCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ChoudharyCodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:*
+                  - logs:*
+                  - s3:*
+                Resource: '*'
+
+  # S3 Bucket for Pipeline Artifacts
+  ChoudharyPipelineBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub choudhary-pipeline-${AWS::AccountId}
+
+  # CodeBuild Project
+  ChoudharyCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: ChoudharyBuild
+      ServiceRole: !GetAtt ChoudharyCodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+
+  # CodePipeline
+  ChoudharyCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt ChoudharyCodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ChoudharyPipelineBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Configuration:
+                Owner: priyankaChoudhary7
+                Repo: ChoudharyDevOps
+                Branch: main
+                PollForSourceChanges: false
+                OAuthToken: !Sub '{{resolve:secretsmanager:${GitHubSecretArn}:SecretString:token}}'
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ProjectName: !Ref ChoudharyCodeBuildProject
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ClusterName: !Ref ChoudharyCluster
+                ServiceName: ChoudharyService
+                FileName: imagedefinitions.json
+
+  # CloudWatch Alarm for Build Failure
+  ChoudharyBuildFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ChoudharyBuildFailureAlarm
+      AlarmDescription: Alarm for CodeBuild failures
+      Namespace: AWS/CodeBuild
+      MetricName: FailedBuilds
+      Dimensions:
+        - Name: ProjectName
+          Value: !Ref ChoudharyCodeBuildProject
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: []
+
+Outputs:
+  LoadBalancerURL:
+    Description: URL of the Load Balancer
+    Value: !GetAtt ChoudharyLoadBalancer.DNSName
+  ECSClusterName:
+    Description: Name of the ECS Cluster
+    Value: !Ref ChoudharyCluster
+  ECRRepositoryURI:
+    Description: URI of the ECR Repository
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/choudhary-app
